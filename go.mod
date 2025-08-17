@@ -1,4 +1,4 @@
-module github.com/SuedePritch/agenticframework
+module github.com/SuedePritch/shadowagents
 
 go 1.23.12
 
