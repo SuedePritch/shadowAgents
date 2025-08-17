@@ -1,10 +1,8 @@
-// internal/pkg/ShadowAgents/dsl.go
 
-package ShadowAgents
+package shadowagents
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -26,11 +24,20 @@ type Tool struct {
 }
 
 // AgentConfig holds the configuration for a single agent.
-// This is the primary way a user will define an agent.
+// This is the primary way a user will define a ShadowAgent.
 type AgentConfig struct {
 	Name         string `json:"name"`
 	ModelName    string `json:"model_name"`
 	SystemPrompt string `json:"system_prompt"`
+}
+
+// Agent is the core struct representing our intelligent agent.
+// It encapsulates the Gemini model and all the agent's logic.
+type Agent struct {
+	name         string
+	model        *genai.GenerativeModel
+	tools        map[string]Tool
+	systemPrompt string
 }
 
 // Setup initializes the global Gemini client. This should be called once at the
@@ -57,7 +64,7 @@ func Close() error {
 // It assumes Setup has already been called and uses the global client.
 func NewAgent(ctx context.Context, config AgentConfig) (*Agent, error) {
 	if client == nil {
-		return nil, fmt.Errorf("Gemini client has not been set up. Call geminiagents.Setup first.")
+		return nil, fmt.Errorf("Gemini client has not been set up. Call shadowagents.Setup first.")
 	}
 
 	// 1. Get the model instance from the shared client.
@@ -66,8 +73,8 @@ func NewAgent(ctx context.Context, config AgentConfig) (*Agent, error) {
 	// 2. Initialize the tools map. Tools will be registered separately.
 	toolsMap := make(map[string]Tool)
 	
-	// 3. Set the system instruction.
-	model.SetSystemInstruction(genai.NewTextPart(config.SystemPrompt))
+	// 3. Set the system instruction. The API for this has changed.
+	model.SetSystemInstruction(genai.NewSystemInstruction(genai.NewTextPart(config.SystemPrompt)))
 
 	return &Agent{
 		name:         config.Name,
@@ -173,21 +180,4 @@ func NewSubAgentTool(subAgent *Agent) Tool {
 			return map[string]string{"result": response}, nil
 		},
 	}
-}
-
-// LoadAgentConfigFromJSON reads a JSON file from the given path and
-// returns an AgentConfig struct. This allows users to define agents declaratively.
-func LoadAgentConfigFromJSON(filePath string) (AgentConfig, error) {
-	var config AgentConfig
-	file, err := os.ReadFile(filePath)
-	if err != nil {
-		return config, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	err = json.Unmarshal(file, &config)
-	if err != nil {
-		return config, fmt.Errorf("failed to unmarshal JSON: %w", err)
-	}
-
-	return config, nil
 }
