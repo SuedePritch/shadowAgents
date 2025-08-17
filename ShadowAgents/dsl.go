@@ -6,24 +6,24 @@ import (
 	"log"
 	"strings"
 
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
+	vtx "cloud.google.com/go/vertexai/genai"
 )
 
-// globalClient is the package-level Gemini client instance.
-var globalClient *genai.Client
+// globalClient is the package-level Vertex AI client instance.
+var globalClient *vtx.Client
+var globalModel *vtx.GenerativeModel
 
 // AgentConfig holds the configuration for an agent.
 type AgentConfig struct {
 	Name        string
 	Description string
-	Model       string // e.g., "gemini-1.5-flash-latest"
+	Model       string // e.g., "gemini-2.0-flash-001"
 }
 
 // Agent represents an autonomous agent that can use tools.
 type Agent struct {
 	config AgentConfig
-	model  *genai.GenerativeModel
+	model  *vtx.GenerativeModel
 	// tools is a map of tool names to their implementations.
 	tools map[string]Tool
 }
@@ -32,7 +32,7 @@ type Agent struct {
 // It consists of the schema for the model (FunctionDeclaration) and the
 // actual Go function to execute.
 type Tool struct {
-	Schema  *genai.FunctionDeclaration
+	Schema  *vtx.FunctionDeclaration
 	Execute func(ctx context.Context, args map[string]any) (map[string]any, error)
 }
 
@@ -47,9 +47,6 @@ type Config struct {
 	MaxOutputTokens *int32   // optional
 }
 
-var globalClient *genai.Client
-var globalModel  *genai.GenerativeModel
-
 // Setup initializes the Vertex AI client with required + optional settings.
 func Setup(ctx context.Context, cfg Config) error {
 	if cfg.ProjectID == "" || cfg.Location == "" {
@@ -59,7 +56,7 @@ func Setup(ctx context.Context, cfg Config) error {
 		return nil // Already initialized
 	}
 
-	client, err := genai.NewClient(ctx, cfg.ProjectID, cfg.Location)
+	client, err := vtx.NewClient(ctx, cfg.ProjectID, cfg.Location)
 	if err != nil {
 		return fmt.Errorf("failed to create vertex ai client: %w", err)
 	}
@@ -70,12 +67,8 @@ func Setup(ctx context.Context, cfg Config) error {
 		m := client.GenerativeModel(cfg.ModelName)
 
 		// Apply optional generation settings
-		if cfg.Temperature != nil ||
-			cfg.TopP != nil ||
-			cfg.MaxOutputTokens != nil {
-
-			m.GenerationConfig = &genai.GenerationConfig{}
-
+		if cfg.Temperature != nil || cfg.TopP != nil || cfg.MaxOutputTokens != nil {
+			m.GenerationConfig = &vtx.GenerationConfig{}
 			if cfg.Temperature != nil {
 				m.GenerationConfig.Temperature = *cfg.Temperature
 			}
@@ -86,10 +79,8 @@ func Setup(ctx context.Context, cfg Config) error {
 				m.GenerationConfig.MaxOutputTokens = *cfg.MaxOutputTokens
 			}
 		}
-
 		globalModel = m
 	}
-
 	return nil
 }
 
@@ -101,6 +92,8 @@ func Close() error {
 	return nil
 }
 
+// Model returns the preconfigured global model (if any).
+func Model() *vtx.GenerativeModel { return globalModel }
 
 // NewAgent creates and initializes a new Agent instance.
 // It assumes Setup has already been called.
@@ -108,8 +101,16 @@ func NewAgent(config AgentConfig) (*Agent, error) {
 	if globalClient == nil {
 		return nil, fmt.Errorf("global client is not initialized; call Setup() first")
 	}
+	if config.Model == "" && globalModel == nil {
+		return nil, fmt.Errorf("no model specified and no global default set")
+	}
 
-	model := globalClient.GenerativeModel(config.Model)
+	var model *vtx.GenerativeModel
+	if config.Model != "" {
+		model = globalClient.GenerativeModel(config.Model)
+	} else {
+		model = globalModel
+	}
 
 	return &Agent{
 		config: config,
@@ -132,20 +133,18 @@ func (a *Agent) RegisterTools(tools ...Tool) {
 func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 	// Apply the agent's registered tools to the model for this run.
 	// The tools must be set on the GenerativeModel, not the ChatSession.
-	var genaiTools []*genai.Tool
 	if len(a.tools) > 0 {
-		var funcDecls []*genai.FunctionDeclaration
+		var funcDecls []*vtx.FunctionDeclaration
 		for _, tool := range a.tools {
 			funcDecls = append(funcDecls, tool.Schema)
 		}
-		genaiTools = append(genaiTools, &genai.Tool{FunctionDeclarations: funcDecls})
-		a.model.Tools = genaiTools
+		a.model.Tools = []*vtx.Tool{{FunctionDeclarations: funcDecls}}
 	}
 
 	session := a.model.StartChat()
 
 	// Send the initial prompt to the model.
-	resp, err := session.SendMessage(ctx, genai.Text(prompt))
+	resp, err := session.SendMessage(ctx, vtx.Text(prompt))
 	if err != nil {
 		return "", fmt.Errorf("failed to send message: %w", err)
 	}
@@ -156,11 +155,10 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 			return responseToText(resp), nil // No valid response, return what we have.
 		}
 
-		// FIX: Check for a function call by performing a type assertion on the response Part.
-		// The `GetFunctionCall` method does not exist directly on the `Part` interface.
-		var fc *genai.FunctionCall
+		// Check for a function call by type assertion on the response Part.
+		var fc *vtx.FunctionCall
 		for _, part := range resp.Candidates[0].Content.Parts {
-			if f, ok := part.(genai.FunctionCall); ok {
+			if f, ok := part.(vtx.FunctionCall); ok {
 				fc = &f
 				break
 			}
@@ -184,7 +182,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 		if err != nil {
 			// Inform the model that the tool call failed.
 			errorResponse := map[string]any{"error": err.Error()}
-			resp, err = session.SendMessage(ctx, genai.FunctionResponse{Name: fc.Name, Response: errorResponse})
+			resp, err = session.SendMessage(ctx, vtx.FunctionResponse{Name: fc.Name, Response: errorResponse})
 			if err != nil {
 				return "", fmt.Errorf("failed to send tool error response: %w", err)
 			}
@@ -192,7 +190,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 		}
 
 		// Send the successful tool result back to the model.
-		resp, err = session.SendMessage(ctx, genai.FunctionResponse{Name: fc.Name, Response: toolResult})
+		resp, err = session.SendMessage(ctx, vtx.FunctionResponse{Name: fc.Name, Response: toolResult})
 		if err != nil {
 			return "", fmt.Errorf("failed to send tool result: %w", err)
 		}
@@ -205,14 +203,14 @@ func NewSubAgentTool(subAgent *Agent) Tool {
 	sanitizedName := strings.ReplaceAll(subAgent.config.Name, " ", "_")
 
 	return Tool{
-		Schema: &genai.FunctionDeclaration{
+		Schema: &vtx.FunctionDeclaration{
 			Name:        sanitizedName,
 			Description: subAgent.config.Description,
-			Parameters: &genai.Schema{
-				Type: genai.TypeObject,
-				Properties: map[string]*genai.Schema{
+			Parameters: &vtx.Schema{
+				Type: vtx.TypeObject,
+				Properties: map[string]*vtx.Schema{
 					"prompt": {
-						Type:        genai.TypeString,
+						Type:        vtx.TypeString,
 						Description: "The detailed prompt or question to ask this agent.",
 					},
 				},
@@ -238,11 +236,11 @@ func NewSubAgentTool(subAgent *Agent) Tool {
 }
 
 // responseToText is a helper to extract and concatenate text from a model's response.
-func responseToText(resp *genai.GenerateContentResponse) string {
+func responseToText(resp *vtx.GenerateContentResponse) string {
 	var b strings.Builder
 	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
 		for _, part := range resp.Candidates[0].Content.Parts {
-			if txt, ok := part.(genai.Text); ok {
+			if txt, ok := part.(vtx.Text); ok {
 				b.WriteString(string(txt))
 			}
 		}
