@@ -36,26 +36,71 @@ type Tool struct {
 	Execute func(ctx context.Context, args map[string]any) (map[string]any, error)
 }
 
-// Setup initializes the global Gemini client. This should be called once.
-func Setup(ctx context.Context, apiKey string) error {
+// Config holds user-supplied Vertex AI setup options.
+type Config struct {
+	ProjectID string // required
+	Location  string // required
+
+	ModelName       string   // optional, e.g. "gemini-2.0-flash-001"
+	Temperature     *float32 // optional
+	TopP            *float32 // optional
+	MaxOutputTokens *int32   // optional
+}
+
+var globalClient *genai.Client
+var globalModel  *genai.GenerativeModel
+
+// Setup initializes the Vertex AI client with required + optional settings.
+func Setup(ctx context.Context, cfg Config) error {
+	if cfg.ProjectID == "" || cfg.Location == "" {
+		return fmt.Errorf("projectID and location are required")
+	}
 	if globalClient != nil {
 		return nil // Already initialized
 	}
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+
+	client, err := genai.NewClient(ctx, cfg.ProjectID, cfg.Location)
 	if err != nil {
-		return fmt.Errorf("failed to create genai client: %w", err)
+		return fmt.Errorf("failed to create vertex ai client: %w", err)
 	}
 	globalClient = client
+
+	// If user specified a model, pre-configure it
+	if cfg.ModelName != "" {
+		m := client.GenerativeModel(cfg.ModelName)
+
+		// Apply optional generation settings
+		if cfg.Temperature != nil ||
+			cfg.TopP != nil ||
+			cfg.MaxOutputTokens != nil {
+
+			m.GenerationConfig = &genai.GenerationConfig{}
+
+			if cfg.Temperature != nil {
+				m.GenerationConfig.Temperature = *cfg.Temperature
+			}
+			if cfg.TopP != nil {
+				m.GenerationConfig.TopP = *cfg.TopP
+			}
+			if cfg.MaxOutputTokens != nil {
+				m.GenerationConfig.MaxOutputTokens = *cfg.MaxOutputTokens
+			}
+		}
+
+		globalModel = m
+	}
+
 	return nil
 }
 
-// Close shuts down the global Gemini client.
+// Close shuts down the global Vertex AI client.
 func Close() error {
 	if globalClient != nil {
 		return globalClient.Close()
 	}
 	return nil
 }
+
 
 // NewAgent creates and initializes a new Agent instance.
 // It assumes Setup has already been called.
