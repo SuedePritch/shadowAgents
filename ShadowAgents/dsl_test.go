@@ -1,14 +1,10 @@
 package shadowagents
-
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/google/generative-ai-go/genai"
 )
 
 // TestAgentFramework runs an end-to-end test of the agent framework.
@@ -45,39 +41,37 @@ func TestAgentFramework(t *testing.T) {
 		}
 	})
 
-	// --- 4. Register a Tool and Execute a Task ---
+	// --- 4. Register a Tool and Execute a Task (Simplified) ---
 	t.Run("RegisterToolAndExecuteTask", func(t *testing.T) {
-		// Create an agent specifically for this test case
 		taskAgent := manager.NewAgent(
 			"Tasker",
 			"You are an agent that finds user emails.",
 		)
 
-		// Register a mock tool
+		// Define the struct for the tool's parameters
+		type getEmailParams struct {
+			Username string `json:"username" description:"The username to look up."`
+		}
+
+		// Register a mock tool using the simplified method
 		const expectedEmail = "test.user@example.com"
-		taskAgent.RegisterTool(
+		getEmailFunc := func(p getEmailParams) (string, error) {
+			if p.Username == "testuser" {
+				// The result should be a simple string, not JSON.
+				// The framework and model handle the JSON structure.
+				return fmt.Sprintf("The email for testuser is %s.", expectedEmail), nil
+			}
+			return "Email not found.", nil
+		}
+
+		err := taskAgent.RegisterTool(
 			"get_email_by_username",
 			"Gets a user's email address by their username.",
-			&genai.Schema{
-				Type: genai.TypeObject,
-				Properties: map[string]*genai.Schema{
-					"username": {Type: genai.TypeString, Description: "The username to look up."},
-				},
-				Required: []string{"username"},
-			},
-			func(args string) (string, error) {
-				var params struct {
-					Username string `json:"username"`
-				}
-				if err := json.Unmarshal([]byte(args), &params); err != nil {
-					return "", fmt.Errorf("failed to unmarshal args: %w", err)
-				}
-				if params.Username == "testuser" {
-					return fmt.Sprintf(`{"email": "%s"}`, expectedEmail), nil
-				}
-				return `{"email": "not.found"}`, nil
-			},
+			getEmailFunc,
 		)
+		if err != nil {
+			t.Fatalf("RegisterTool() failed: %v", err)
+		}
 
 		// Execute a task that should trigger the tool
 		prompt := "What is the email for the user 'testuser'?"
